@@ -23,17 +23,26 @@ vector_table:
 
 reset_handler:
 
-    // Set up stack pointer
+    // Disable IRQ and FIQ during initialization
+    cpsid if
+
+    // Set IRQ mode stack
+    cps #0x12
+    ldr sp, =_irq_stack_top
+
+    // Set Supervisor mode stack
+    cps #0x13
     ldr sp, =_stack_top
-    
+
     // Set up exception vector table base address (VBAR - Vector Base Address Register)
     ldr r0, =vector_table
     mcr p15, 0, r0, c12, c0, 0
-    
+    dsb
+    isb
+
     // Call main function
     bl main
-    
-    // If main returns, loop forever
+
 hang:
     b hang
 
@@ -51,24 +60,76 @@ data_handler:
     b hang
 
 
-// TODO: Implement IRQ handler
-// This handler should:
-// 1. Save all registers (r0-r12, lr)
-// 2. Call the timer_irq_handler() function in C
-// 3. Restore all registers
-// 4. Return from interrupt using: subs pc, lr, #4
+// IRQ handler with PCB-based context switch
 irq_handler:
 
-    // 1. Save all registers
-    push {r0-r12, lr}
+    // Save original r0 and lr_irq on IRQ stack
+    sub sp, sp, #8
+    str r0, [sp]
+    str lr, [sp, #4]
 
-    // 2. Call C timer interrupt handler
+    // r3 = IRQ stack pointer
+    mov r3, sp
+
+    // r2 = lr_irq
+    ldr r2, [r3, #4]
+
+    // r0 = original r0
+    ldr r0, [r3]
+
+    // Switch to System mode so we can use task stack
+    cps #0x1F
+
+    // Reserve 56 bytes on current task stack
+    sub sp, sp, #56
+
+    // Save r0-r12 into current task context frame
+    stmia sp, {r0-r12}
+
+    // Save synthetic lr at offset 52
+    str r2, [sp, #52]
+
+    // r0 = saved current task sp
+    mov r0, sp
+
+    // Back to IRQ mode
+    cps #0x12
+
+    // Restore IRQ stack pointer
+    mov sp, r3
+
+    // Clear timer + ask scheduler for next task sp
+    push {r4, lr}
     bl timer_irq_handler
+    bl schedule_next_sp
+    pop {r4, lr}
 
-    // 3. Restore registers
-    pop {r0-r12, lr}
+    // r4 = next task sp
+    mov r4, r0
 
-    // 4. Return from interrupt
+    // Switch to System mode and restore next task context
+    cps #0x1F
+    mov sp, r4
+
+    // Restore r0-r12
+    ldmia sp, {r0-r12}
+
+    // Load synthetic lr
+    ldr r1, [sp, #52]
+
+    // Pop context frame
+    add sp, sp, #56
+
+    // Back to IRQ mode
+    cps #0x12
+
+    // Put next task return address in lr_irq
+    mov lr, r1
+
+    // Drop temporary IRQ scratch
+    add sp, sp, #8
+
+    // Return from IRQ into selected task
     subs pc, lr, #4
 
 
@@ -109,11 +170,41 @@ enable_irq:
     bx lr
 
 
+// Start first task from an initialized PCB stack
+// r0 = task sp
+.globl start_first_task
+start_first_task:
+
+    // Switch to System mode
+    cps #0x1F
+
+    // Load task stack
+    mov sp, r0
+
+    // Restore r0-r12
+    ldmia sp, {r0-r12}
+
+    // Load synthetic lr
+    ldr r1, [sp, #52]
+
+    // Pop context frame
+    add sp, sp, #56
+
+    // Jump to task entry
+    sub r1, r1, #4
+    bx r1
+
+
 // Stack space allocation
 .section .bss
 .align 4
 
+_irq_stack_bottom:
+    .skip 0x1000  @ 4KB IRQ stack
+
+_irq_stack_top:
+
 _stack_bottom:
-    .skip 0x2000  @ 8KB stack space
+    .skip 0x2000  @ 8KB Supervisor stack
 
 _stack_top:
