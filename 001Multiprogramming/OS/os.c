@@ -29,6 +29,34 @@
 #define WSPR             (WDT1_BASE + 0x48)        // Watchdog Start/Stop Register
 #define WWPS             (WDT1_BASE + 0x34)        // Watchdog Write Posting Bits
 
+// OS Data and Stack Regions
+#define OS_DATA  0x82000000 // SIZE 64KB
+#define OS_STACK 0x82010000 // SIZE 8KB
+
+// Process 1
+#define P1_DATA  0x82100000 // SIZE 64KB
+#define P1_STACK 0x82110000 // SIZE 8KB
+
+// "Process 2" will be replaced by a Tick task
+#define P2_STACK 0x82210000 // SIZE 8KB
+
+// Context frame size:
+// r0-r12 = 13 regs, lr = 1 reg => 14 * 4 = 56 bytes
+#define CONTEXT_SIZE 56
+
+
+// ============================================================================
+// PCB
+// ============================================================================
+
+typedef struct {
+    unsigned int sp;
+} PCB;
+
+static PCB pcb_p1;
+static PCB pcb_tick;
+static PCB *current_pcb;
+
 
 // ============================================================================
 // Watchdog Functions
@@ -63,6 +91,64 @@ void os_write(const char *s) {
         }
         uart_putc(*s++);
     }
+}
+
+
+// ============================================================================
+// Tick Task
+// ============================================================================
+
+void tick_task(void) {
+    while (1) {
+        os_write("Tick\n");
+
+        for (volatile int i = 0; i < 1000000; i++) {
+        }
+    }
+}
+
+
+// ============================================================================
+// Process / Scheduler Functions
+// ============================================================================
+
+static void init_task_stack(PCB *pcb, unsigned int stack_base, unsigned int entry) {
+    unsigned int *sp;
+
+    // top of stack (stack grows downward)
+    sp = (unsigned int *)(stack_base + 0x2000);
+
+    // reserve space for r0-r12 + lr
+    sp = (unsigned int *)((unsigned int)sp - CONTEXT_SIZE);
+
+    // initialize r0-r12 to 0
+    for (int i = 0; i < 13; i++) {
+        sp[i] = 0;
+    }
+
+    // synthetic lr so that "subs pc, lr, #4" lands on entry
+    sp[13] = entry + 4;
+
+    pcb->sp = (unsigned int)sp;
+}
+
+void process_init(void) {
+    init_task_stack(&pcb_p1,   P1_STACK, (unsigned int)P1_DATA);
+    init_task_stack(&pcb_tick, P2_STACK, (unsigned int)tick_task);
+
+    current_pcb = &pcb_p1;
+}
+
+unsigned int schedule_next_sp(unsigned int current_sp) {
+    current_pcb->sp = current_sp;
+
+    if (current_pcb == &pcb_p1) {
+        current_pcb = &pcb_tick;
+    } else {
+        current_pcb = &pcb_p1;
+    }
+
+    return current_pcb->sp;
 }
 
 
@@ -114,7 +200,7 @@ void timer_init(void) {
 // This function should:
 // 1. Clear the timer interrupt flag (TISR = 0x2)
 // 2. Acknowledge the interrupt to the controller (INTC_CONTROL = 0x1)
-// 3. Print "Tick\n" via UART
+// 3. Perform scheduling
 void timer_irq_handler(void) {
 
     // 1) Clear overflow interrupt flag
@@ -123,8 +209,8 @@ void timer_irq_handler(void) {
     // 2) Acknowledge to interrupt controller
     PUT32(INTC_CONTROL, 0x1);
 
-    // 3) Print Tick
-    os_write("Tick\n");
+    // 3) Real context switch is done in root.s
+    // This function only clears the interrupt.
 }
 
 
@@ -141,19 +227,23 @@ int main(void) {
     disable_watchdog();
     os_write("Watchdog disabled\n");
 
+    // Initialize task PCBs
+    process_init();
+    os_write("Processes initialized\n");
+
     // TODO: Initialize the timer using timer_init()
     timer_init();
     os_write("Timer initialized\n");
 
     // TODO: Enable interrupts using enable_irq()
     enable_irq();
+    os_write("Interrupts enabled\n");
 
-    // TODO: Print a message indicating interrupts are enabled
-    os_write("Enabling interrupts...\n");
+    // Start first task (Process1)
+    start_first_task(pcb_p1.sp);
 
-    // Main loop
+    // Should never return
     while (1) {
-        // CPU stays here while timer interrupts occur
     }
 
     return 0;
