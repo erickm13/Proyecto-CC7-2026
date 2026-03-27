@@ -2,7 +2,7 @@ ENTRY(_start)
 
 MEMORY
 {
-    ram : ORIGIN = 0x82000000, LENGTH = 256K
+    ram : ORIGIN = 0x82100000, LENGTH = 64K
 }
 
 SECTIONS
@@ -11,6 +11,7 @@ SECTIONS
 
     .text :
     {
+        *(.text.startup)  /* Garantiza que _start sea lo primerito */
         *(.text*)
         *(.rodata*)
     } > ram
@@ -29,7 +30,4 @@ SECTIONS
         *(COMMON)
         __bss_end__ = .;
     } > ram
-
-    _stack_bottom = __bss_end__;
-    _stack_top = ORIGIN(ram) + LENGTH(ram);
 }

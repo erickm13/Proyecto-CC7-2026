@@ -1,0 +1,1010 @@
+================================================================================
+                    GUÍA DE ESTUDIO: SISTEMA MULTIPROGRAMACIÓN
+                    BeagleBone Black & QEMU versatilepb
+                    Sistemas Operativos - CC7-OS
+================================================================================
+
+Autor: Asistente de Estudio
+Fecha: 26 de Marzo, 2026
+Proyecto: Multiprogramming OS para ARM
+
+================================================================================
+                              ÍNDICE DE CONTENIDOS
+================================================================================
+
+1. RESUMEN EJECUTIVO DEL PROYECTO
+2. ARQUITECTURA GENERAL DEL SISTEMA
+3. DIAGRAMA DE FLUJO PRINCIPAL (ASCII)
+4. ESTRUCTURA DE MEMORIA
+5. PROCESO DE ARRANQUE (BOOT PROCESS)
+6. GESTIÓN DE INTERRUPCIONES
+7. CAMBIO DE CONTEXTO (CONTEXT SWITCH)
+8. COMPARATIVA: BEAGLEBONE BLACK vs QEMU versatilepb
+9. RESPUESTA A PREGUNTA SOBRE PCB
+10. VERIFICACIÓN Y PRUEBAS
+11. COMANDOS ÚTILES PARA LA PRESENTACIÓN
+
+================================================================================
+                     1. RESUMEN EJECUTIVO DEL PROYECTO
+================================================================================
+
+OBJETIVO PRINCIPAL:
+Implementar un sistema de multiprogramación mínimo que ejecute dos procesos de
+usuario (P1 y P2) de forma intercalada mediante un planificador Round-Robin
+basado en interrupciones de temporizador.
+
+COMPONENTES CLAVE:
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  SISTEMA OPERATIVO (OS)                                                     │
+│  ├── Inicialización de hardware (UART, Timer, Controlador de Interrup.)     │
+│  ├── Planificador Round-Robin                                               │
+│  ├── Manejador de interrupciones IRQ                                        │
+│  └── Gestión de PCB (Process Control Blocks)                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  PROCESO 1 (P1)                                                             │
+│  └── Imprime dígitos 0-9 en bucle infinito                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  PROCESO 2 (P2)                                                             │
+│  └── Imprime letras a-z en bucle infinito                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+RESULTADO ESPERADO:
+Salida serial intercalada mostrando que ambos procesos comparten la CPU:
+    ----From P1: 0
+    ----From P1: 1
+    ----From P2: a
+    ----From P2: b
+    Tick
+    ----From P1: 2
+    ...
+
+================================================================================
+                    2. ARQUITECTURA GENERAL DEL SISTEMA
+================================================================================
+
+DIAGRAMA DE CAPAS:
+
+    ┌──────────────────────────────────────────────────────────────────┐
+    │                    CAPA DE USUARIO                               │
+    │  ┌─────────────────────┐  ┌─────────────────────┐                │
+    │  │   P1 (main.c)       │  │   P2 (main.c)       │                │
+    │  │   - Imprime 0-9     │  │   - Imprime a-z     │                │
+    │  │   - Usa PRINT()     │  │   - Usa PRINT()     │                │
+    │  └─────────┬───────────┘  └─────────┬───────────┘                │
+    └────────────┼────────────────────────┼────────────────────────────┘
+                 │                        │
+    ┌────────────┼────────────────────────┼────────────────────────────┐
+    │            │         CAPA DE        │                            │
+    │            ▼         BIBLIOTECA     ▼                            │
+    │  ┌─────────────────────────────────────────────────┐             │
+    │  │  stdio.c  │  uart.c  │  string.c                │             │
+    │  │  - PRINT()│  - putc  │  - strncpy               │             │
+    │  │  - itoa   │  - gets  │                          │             │
+    │  └─────────────────────────────────────────────────┘             │
+    └──────────────────────────────────────────────────────────────────┘
+                 │
+    ┌────────────┼────────────────────────────────────────────────────┐
+    │            ▼         CAPA DE SISTEMA OPERATIVO                  │
+    │  ┌─────────────────────────────────────────────────┐            │
+    │  │  root.s (Assembly ARM)                          │            │
+    │  │  - Tabla de vectores                            │            │
+    │  │  - irq_handler                                  │            │
+    │  │  - start_process_asm                            │            │
+    │  └─────────────────────────────────────────────────┘            │
+    │  ┌─────────────────────────────────────────────────┐            │
+    │  │  os.c (C)                                       │            │
+    │  │  - main()                                       │            │
+    │  │  - create_process()                             │            │
+    │  │  - schedule()                                   │            │
+    │  │  - c_context_switch()                           │            │
+    │  └─────────────────────────────────────────────────┘            │
+    │  ┌─────────────────────────────────────────────────┐            │
+    │  │  timer.c                                        │            │
+    │  │  - timer_init()                                 │            │
+    │  │  - timer_irq_handler()                          │            │
+    │  └─────────────────────────────────────────────────┘            │
+    └─────────────────────────────────────────────────────────────────┘
+                 │
+    ┌────────────┼────────────────────────────────────────────────────┐
+    │            ▼         HARDWARE (ARM Cortex-A8 / VersatilePB)     │
+    │  ┌─────────────────────────────────────────────────────────┐    │
+    │  │  UART0  │  DMTIMER2/SP804  │  INTC/VIC  │  Watchdog     │    │
+    │  └─────────────────────────────────────────────────────────┘    │
+    └─────────────────────────────────────────────────────────────────┘
+
+
+FLUJO DE DATOS DURANTE UNA INTERRUPCIÓN:
+
+    Timer Overflow
+         │
+         ▼
+    ┌─────────────────┐
+    │  Hardware IRQ   │  (Señal física al CPU)
+    └────────┬────────┘
+             ▼
+    ┌─────────────────┐
+    │  Vector Table   │  (Salta a irq_handler en root.s)
+    │  (0x18 → IRQ)   │
+    └────────┬────────┘
+             ▼
+    ┌─────────────────┐
+    │  irq_handler    │  Guarda R0-R12, LR, SPSR en la pila
+    │  (root.s)       │  Llama a c_context_switch()
+    └────────┬────────┘
+             ▼
+    ┌─────────────────┐
+    │  c_context_     │  1. Guarda SP actual en PCB[current]
+    │  switch(os.c)   │  2. Llama timer_irq_handler()
+    │                 │  3. Llama schedule() → siguiente proceso
+    └────────┬────────┘
+             ▼
+    ┌─────────────────┐
+    │  schedule()     │  Round-Robin: alterna P1 ↔ P2
+    │  (os.c)         │
+    └────────┬────────┘
+             ▼
+    ┌─────────────────┐
+    │  Retorno con    │  Carga SP del nuevo proceso
+    │  nuevo SP       │  Restaura registros
+    └────────┬────────┘
+             ▼
+    subs pc, lr, #4  →  Ejecuta siguiente proceso
+
+================================================================================
+                    3. DIAGRAMA DE FLUJO PRINCIPAL (ASCII)
+================================================================================
+
+┌══════════════════════════════════════════════════════════════════════════════┐
+│                           FASE 1: INICIALIZACIÓN                             │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+    ┌──────────────────┐
+    │  CPU Reset       │
+    │  (U-Boot/QEMU)   │
+    └────────┬─────────┘
+             │
+             ▼
+    ┌──────────────────┐
+    │  _start (root.s) │
+    │  - Modo SVC      │
+    │  - Set SP        │
+    │  - Copia vectores│
+    └────────┬─────────┘
+             │
+             ▼
+    ┌──────────────────┐
+    │  Clear .bss      │
+    │  (Inicializa     │
+    │   variables C)   │
+    └────────┬─────────┘
+             │
+             ▼
+    ┌──────────────────┐
+    │  main() (os.c)   │
+    └────────┬─────────┘
+             │
+    ┌────────┴──────────────────────────────────────────┐
+    │                                                   │
+    ▼                                                   ▼
+┌──────────────────┐                          ┌──────────────────┐
+│ watchdog_disable()│                         │ create_process() │
+│ - Beagle: WDT1   │                          │ - PCB[PID_P1]    │
+│ - QEMU: No-op    │                          │ - PCB[PID_P2]    │
+└──────────────────┘                          └──────────────────┘
+                                                     │
+                                                     ▼
+                                            ┌──────────────────┐
+                                            │ timer_init()     │
+                                            │ - DMTIMER2/SP804 │
+                                            │ - Enable IRQ     │
+                                            └──────────────────┘
+                                                     │
+                                                     ▼
+                                            ┌──────────────────┐
+                                            │ first_context_   │
+                                            │ switch()         │
+                                            └────────┬─────────┘
+                                                     │
+                                                     ▼
+    ┌══════════════════════════════════════════════════════════════════════════┐
+    │                         FASE 2: EJECUCIÓN DE PROCESOS                    │
+    └──────────────────────────────────────────────────────────────────────────┘
+
+                                                     │
+                                                     ▼
+                                            ┌──────────────────┐
+                                            │  P1 ejecuta      │
+                                            │  PRINT("0")      │
+                                            │  delay()         │
+                                            └────────┬─────────┘
+                                                     │
+                                                     │ (1 segundo pasa)
+                                                     ▼
+                                            ┌──────────────────┐
+                                            │  Timer Overflow  │
+                                            │  (IRQ Triggered) │
+                                            └────────┬─────────┘
+                                                     │
+                                                     ▼
+                                            ┌──────────────────┐
+                                            │  irq_handler     │
+                                            │  (root.s)        │
+                                            │  Save context    │
+                                            └────────┬─────────┘
+                                                     │
+                                                     ▼
+                                            ┌──────────────────┐
+                                            │  c_context_      │
+                                            │  switch()        │
+                                            │  - Save P1 SP    │
+                                            │  - schedule()    │
+                                            │  - Return P2 SP  │
+                                            └────────┬─────────┘
+                                                     │
+                                                     ▼
+                                            ┌──────────────────┐
+                                            │  P2 ejecuta      │
+                                            │  PRINT("a")      │
+                                            │  delay()         │
+                                            └────────┬─────────┘
+                                                     │
+                                                     │ (1 segundo pasa)
+                                                     ▼
+                                            ┌──────────────────┐
+                                            │  Timer Overflow  │
+                                            │  (IRQ Triggered) │
+                                            └────────┬─────────┘
+                                                     │
+                                                     ▼
+                                            ┌──────────────────┐
+                                            │  irq_handler     │
+                                            │  Save P2, Load P1│
+                                            └────────┬─────────┘
+                                                     │
+                                                     ▼
+                                            ┌──────────────────┐
+                                            │  ... CICLO       │
+                                            │  CONTINÚA ...    │
+                                            └──────────────────┘
+
+
+================================================================================
+                         4. ESTRUCTURA DE MEMORIA
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  BEAGLEBONE BLACK (AM335x) - Memory Map                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Dirección        │ Tamaño │ Descripción                                    │
+│  ─────────────────┼────────┼──────────────────────────────────────────────  │
+│  0x82000000       │ 64 KB  │ OS Code/Data (.text, .data, .bss)              │
+│  0x82010000       │ 8 KB   │ OS Stack (grows down)                          │
+│                   │        │                                                │
+│  0x82100000       │ 64 KB  │ P1 Code/Data                                   │
+│  0x82110000       │ 8 KB   │ P1 Stack                                       │
+│                   │        │                                                │
+│  0x82200000       │ 64 KB  │ P2 Code/Data                                   │
+│  0x82210000       │ 8 KB   │ P2 Stack                                       │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  QEMU versatilepb - Memory Map                                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Dirección        │ Tamaño │ Descripción                                    │
+│  ─────────────────┼────────┼──────────────────────────────────────────────  │
+│  0x00000000       │ 64 KB  │ OS Code/Data (vector table here!)              │
+│  0x00010000       │ 64 KB  │ OS Stack                                       │
+│                   │        │                                                │
+│  0x00200000       │ 1 MB   │ P1 Code/Data                                   │
+│  0x00300000       │ 1 MB   │ P1 Stack (top of P1 region)                    │
+│                   │        │                                                │
+│  0x00300000       │ 1 MB   │ P2 Code/Data                                   │
+│  0x00400000       │ 1 MB   │ P2 Stack (top of P2 region)                    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+DIAGRAMA VISUAL DE LA PILA (STACK) PARA CADA PROCESO:
+
+    Dirección Alta (Stack Top)
+    ┌─────────────────────────┐
+    │   SPSR (0x13)           │  ← Estado del procesador (SVC mode, IRQ enabled)
+    ├─────────────────────────┤
+    │   LR (Entry Point)      │  ← Dirección de inicio del proceso
+    ├─────────────────────────┤
+    │   R12                   │
+    ├─────────────────────────┤
+    │   R11                   │
+    ├─────────────────────────┤
+    │   ...                   │  ← Registros R0-R12 inicializados en 0
+    ├─────────────────────────┤
+    │   R1                    │
+    ├─────────────────────────┤
+    │   R0                    │
+    └─────────────────────────┘
+    Dirección Baja (Stack Bottom)
+    
+    PCB.sp → Apunta al SPSR (primero en salir, último en entrar)
+
+
+================================================================================
+                    5. PROCESO DE ARRANQUE (BOOT PROCESS)
+================================================================================
+
+SECUENCIA DE ARRANQUE - BEAGLEBONE BLACK:
+
+    1. Power On
+           │
+           ▼
+    2. ROM Code (internal)
+       - Busca boot device (SD, MMC, NAND)
+           │
+           ▼
+    3. SPL (Secondary Program Loader)
+       - Inicializa DDR RAM
+           │
+           ▼
+    4. U-Boot
+       - Carga os.bin, p1.bin, p2.bin en memoria
+       - Ejecuta: go 0x82000000
+           │
+           ▼
+    5. _start (root.s)
+       - Configura CPU en modo SVC
+       - Establece SP = 0x82010000
+       - Copia vector table
+       - Limpia .bss
+           │
+           ▼
+    6. main() (os.c)
+       - Desactiva Watchdog
+       - Inicializa PCBs
+       - Inicia Timer
+       - first_context_switch() → P1
+
+
+SECUENCIA DE ARRANQUE - QEMU:
+
+    1. qemu-system-arm -kernel os.elf
+           │
+           ▼
+    2. QEMU carga ELF en 0x00000000
+       - device loader para p1.bin y p2.bin
+           │
+           ▼
+    3. _start (root.s)
+       - Copia vector table a 0x00000000
+       - Configura SP modo IRQ = 0x0000BFFF
+       - Configura SP modo SVC = 0x00010000
+       - Limpia .bss
+           │
+           ▼
+    4. main() (os.c)
+       - Inicializa PCBs
+       - Inicia Timer SP804
+       - enable_irq()
+       - first_context_switch() → P1
+
+
+================================================================================
+                    6. GESTIÓN DE INTERRUPCIONES
+================================================================================
+
+CONFIGURACIÓN DE INTERRUPCIONES:
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  BEAGLEBONE BLACK - INTC (Interrupt Controller)                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Timer: DMTIMER2                                                            │
+│  Base: 0x48040000                                                           │
+│  IRQ Number: 68                                                             │
+│                                                                             │
+│  Configuración en timer_init():                                             │
+│  1. PUT32(INTC_MIR_CLEAR2, 0x10)  → Unmask IRQ 68 (bit 4)                  │
+│  2. PUT32(INTC_ILR68, 0x0)        → Prioridad 0 (más alta)                 │
+│  3. PUT32(TIER, 0x2)              → Enable overflow interrupt               │
+│                                                                             │
+│  Ack en timer_irq_handler():                                                │
+│  1. PUT32(TISR, 0x2)              → Clear timer interrupt                   │
+│  2. PUT32(INTC_CONTROL, 0x1)      → EOI (End of Interrupt)                 │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  QEMU versatilepb - VIC (Vector Interrupt Controller)                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Timer: SP804 Timer 0                                                       │
+│  Base: 0x101E2000                                                           │
+│  IRQ Number: 4                                                              │
+│                                                                             │
+│  Configuración en timer_init():                                             │
+│  1. PUT32(VIC_INTENABLE, (1 << 4)) → Enable IRQ 4                          │
+│  2. PUT32(TIMER0_CTRL, 0xE2)       → Enable + Periodic + Interrupt         │
+│                                                                             │
+│  Ack en timer_irq_handler():                                                │
+│  1. PUT32(TIMER0_INTCLR, 0x1)     → Clear timer interrupt                   │
+│  2. PUT32(VIC_VECTADDR, 0)        → EOI (End of Interrupt)                 │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+TABLA DE VECTORES DE EXCEPCIÓN (AMBAS PLATAFORMAS):
+
+    Dirección  │  Excepción
+    ───────────┼─────────────────────────────────────
+    0x00       │  Reset
+    0x04       │  Undefined Instruction
+    0x08       │  Software Interrupt (SWI/SVC)
+    0x0C       │  Prefetch Abort
+    0x10       │  Data Abort
+    0x14       │  Reserved (NOP)
+    0x18       │  IRQ ← ¡LA QUE USAMOS PARA EL TIMER!
+    0x1C       │  FIQ
+
+
+================================================================================
+                    7. CAMBIO DE CONTEXTO (CONTEXT SWITCH)
+================================================================================
+
+ESTRUCTURA DEL PCB (Process Control Block):
+
+    typedef struct {
+        uint32_t pid;           // Process ID (0=OS, 1=P1, 2=P2)
+        ProcessState state;     // READY, RUNNING, BLOCKED
+        uint32_t sp;            // Stack Pointer → contexto guardado
+    } PCB;
+
+    PCB pcb[3];  // Array global para todos los procesos
+
+
+DIAGRAMA DEL CAMBIO DE CONTEXTO:
+
+    ┌─────────────────────────────────────────────────────────────────────────┐
+    │  ANTES DE LA INTERRUPCIÓN: P1 ejecutando                               │
+    ├─────────────────────────────────────────────────────────────────────────┤
+    │                                                                         │
+    │  CPU Registers:    P1's Stack:            PCB[PID_P1]:                  │
+    │  R0 = ...          [SPSR]                 pid = 1                       │
+    │  R1 = ...          [LR = P1's PC]         state = RUNNING               │
+    │  ...               [R12]                  sp → ──────────────┐          │
+    │  SP → ─────────────[R11]                              │     │          │
+    │  PC → ejecutando   [R10]                              │     │          │
+    │                    ...                                │     │          │
+    │                    [R0]  ← SP actual                  │     │          │
+    │                                                       │     │          │
+    │  PCB[PID_P2]:                                        │     │          │
+    │  pid = 2                                             │     │          │
+    │  state = READY                                       │     │          │
+    │  sp → ───────────────────────────────────────────────┘     │          │
+    │         │                                                    │          │
+    │         └────────────────────────────────────────────────────┘          │
+    │                  (apunta al SPSR de P2)                                 │
+    └─────────────────────────────────────────────────────────────────────────┘
+
+    ┌─────────────────────────────────────────────────────────────────────────┐
+    │  DURANTE LA INTERRUPCIÓN (irq_handler)                                 │
+    ├─────────────────────────────────────────────────────────────────────────┤
+    │                                                                         │
+    │  1. sub lr, lr, #4           ← Ajusta LR para retorno                  │
+    │  2. cps #0x13                ← Cambia a modo SVC                       │
+    │  3. push {r0-r12}            ← Guarda registros en pila de P1          │
+    │  4. push {lr}                ← Guarda PC de retorno                    │
+    │  5. mrs r12, spsr            ← Lee SPSR                                │
+    │  6. push {r12}               ← Guarda SPSR en pila                     │
+    │  7. bl c_context_switch      ← Llama al planificador en C              │
+    │                                                                         │
+    └─────────────────────────────────────────────────────────────────────────┘
+
+    ┌─────────────────────────────────────────────────────────────────────────┐
+    │  c_context_switch() EN C                                               │
+    ├─────────────────────────────────────────────────────────────────────────┤
+    │                                                                         │
+    │  uint32_t c_context_switch(uint32_t current_sp) {                       │
+    │      // 1. Guardar SP actual en PCB del proceso corriente              │
+    │      pcb[current_process].sp = current_sp;                             │
+    │                                                                        │
+    │      // 2. Ack timer interrupt                                         │
+    │      timer_irq_handler();                                              │
+    │                                                                        │
+    │      // 3. Planificar siguiente proceso (Round-Robin)                  │
+    │      uint32_t next_process = schedule();                               │
+    │                                                                        │
+    │      // 4. Retornar SP del nuevo proceso                               │
+    │      return pcb[next_process].sp;                                      │
+    │  }                                                                     │
+    │                                                                         │
+    └─────────────────────────────────────────────────────────────────────────┘
+
+    ┌─────────────────────────────────────────────────────────────────────────┐
+    │  schedule() - Round-Robin Simple                                       │
+    ├─────────────────────────────────────────────────────────────────────────┤
+    │                                                                         │
+    │  uint32_t schedule(void) {                                             │
+    │      if (current_process == PID_P1) {                                  │
+    │          next = PID_P2;  // Si P2 no está bloqueado                    │
+    │      } else if (current_process == PID_P2) {                           │
+    │          next = PID_P1;  // Si P1 no está bloqueado                    │
+    │      }                                                                 │
+    │                                                                        │
+    │      // Actualizar estados                                             │
+    │      pcb[current_process].state = READY;                               │
+    │      current_process = next;                                           │
+    │      pcb[current_process].state = RUNNING;                             │
+    │                                                                        │
+    │      return current_process;                                           │
+    │  }                                                                     │
+    │                                                                         │
+    └─────────────────────────────────────────────────────────────────────────┘
+
+    ┌─────────────────────────────────────────────────────────────────────────┐
+    │  DESPUÉS DEL CAMBIO: P2 ejecutando                                     │
+    ├─────────────────────────────────────────────────────────────────────────┤
+    │                                                                         │
+    │  1. sp = pcb[PID_P2].sp       ← Carga SP de P2                         │
+    │  2. pop {r12}                 ← Saca SPSR de P2                        │
+    │  3. msr spsr_cxsf, r12        ← Restaura SPSR                          │
+    │  4. pop {lr}                  ← Saca Entry Point de P2                 │
+    │  5. pop {r0-r12}              ← Restaura registros de P2               │
+    │  6. subs pc, lr, #0           ← Salta a P2, cambia modo                │
+    │                                                                         │
+    │  ¡AHORA P2 ESTÁ EJECUTANDO!                                            │
+    │                                                                         │
+    └─────────────────────────────────────────────────────────────────────────┘
+
+
+================================================================================
+        8. COMPARATIVA: BEAGLEBONE BLACK vs QEMU versatilepb
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  TABLA COMPARATIVA COMPLETA                                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  CARACTERÍSTICA           │ BEAGLEBONE BLACK    │ QEMU versatilepb         │
+│  ─────────────────────────┼─────────────────────┼──────────────────────────│
+│  CPU                      │ ARM Cortex-A8       │ ARM926EJ-S (emulado)     │
+│  Frecuencia               │ 1 GHz               │ Variable (simulado)      │
+│  RAM                      │ 512 MB DDR3         │ Configurable (-m 128M)   │
+│                                                                             │
+│  DIRECCIONES DE MEMORIA:                                                  │
+│  ───────────────────────                                                  │
+│  OS Base                  │ 0x82000000        │ 0x00000000                │
+│  P1 Base                  │ 0x82100000        │ 0x00200000                │
+│  P2 Base                  │ 0x82200000        │ 0x00300000                │
+│                                                                             │
+│  TEMPORIZADOR:                                                            │
+│  ───────────────                                                            │
+│  Hardware                 │ AM335x DMTIMER2   │ ARM SP804 Timer            │
+│  Base Address             │ 0x48040000        │ 0x101E2000                 │
+│  Frecuencia               │ 24 MHz            │ 1 MHz (emulado)            │
+│  IRQ Number               │ 68                │ 4                          │
+│                                                                             │
+│  CONTROLADOR DE INTERRUP:                                                   │
+│  ────────────────────────                                                   │
+│  Tipo                     │ INTC (TI)         │ VIC (ARM)                  │
+│  Base Address             │ 0x48200000        │ 0xFFFFF000                 │
+│  Register MIR_CLEAR       │ INTC_MIR_CLEAR2   │ N/A (usa INTENABLE)        │
+│  Register EOI             │ INTC_CONTROL      │ VIC_VECTADDR               │
+│                                                                             │
+│  UART:                                                                      │
+│  ────────                                                                   │
+│  Hardware                 │ OMAP UART         │ PL011 UART                 │
+│  Base Address             │ 0x44E09000        │ 0x101F1000                 │
+│  Register THRE (bit)      │ 5 (0x20)          │ 5 (0x20)                   │
+│  Register RXFE (bit)      │ 6 (0x40)          │ 4 (0x10)                   │
+│                                                                             │
+│  WATCHDOG:                                                                  │
+│  ───────────                                                                │
+│  Hardware                 │ WDT1              │ No presente por defecto    │
+│  Base Address             │ 0x44E35000        │ N/A                        │
+│  Disable Sequence         │ 0xAAAA → 0x5555   │ No necesario (no-op)       │
+│  Timeout                  │ ~60 segundos      │ N/A                        │
+│                                                                             │
+│  CARGA DE BINARIOS:                                                         │
+│  ──────────────────────                                                     │
+│  Método                   │ U-Boot loady      │ QEMU -device loader        │
+│  Comando                  │ loady 0x82000000  │ -device loader,file=...    │
+│                           │ go 0x82000000     │ -kernel os.elf             │
+│                                                                             │
+│  REGISTROS ADICIONALES:                                                     │
+│  ──────────────────────                                                     │
+│  Clock Control            │ CLKSEL_TIMER2_CLK │ N/A (reloj fijo)           │
+│                           │ CM_PER_TIMER2     │                            │
+│                           │ _CLKCTRL          │                            │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+MODIFICACIONES NECESARIAS PARA QEMU:
+
+1. CAMBIOS EN DIRECCIONES DE MEMORIA:
+   - Beagle usa 0x82xxxxxx (SDRAM externo)
+   - QEMU usa 0x00xxxxxx (memoria inicia en 0)
+   - Razón: QEMU versatilepb mapea RAM desde 0x00000000
+
+2. CAMBIOS EN EL TIMER:
+   Beagle (DMTIMER2):
+   ```c
+   #define DMTIMER2_BASE    0x48040000
+   #define TCLR             (DMTIMER2_BASE + 0x38)
+   #define TIER             (DMTIMER2_BASE + 0x2C)
+   PUT32(TIER, 0x2);  // Enable overflow interrupt
+   ```
+
+   QEMU (SP804):
+   ```c
+   #define TIMER0_BASE      0x101E2000
+   #define TIMER0_CTRL      (TIMER0_BASE + 0x0C)
+   #define TIMER0_LOAD      (TIMER0_BASE + 0x00)
+   PUT32(TIMER0_CTRL, 0xE2);  // Enable + Periodic + Interrupt
+   ```
+
+3. CAMBIOS EN EL CONTROLADOR DE INTERRUPCIONES:
+   Beagle (INTC):
+   ```c
+   #define INTCPS_BASE      0x48200000
+   #define INTC_MIR_CLEAR2  (INTCPS_BASE + 0xC8)
+   PUT32(INTC_MIR_CLEAR2, 0x10);  // Unmask IRQ 68
+   PUT32(INTC_CONTROL, 0x1);      // EOI
+   ```
+
+   QEMU (VIC):
+   ```c
+   #define VIC_BASE         0xFFFFF000
+   #define VIC_INTENABLE    (VIC_BASE + 0x100)
+   PUT32(VIC_INTENABLE, (1 << 4));  // Enable IRQ 4
+   PUT32(VIC_VECTADDR, 0);          // EOI
+   ```
+
+4. CAMBIOS EN UART:
+   Beagle (OMAP):
+   ```c
+   #define UART0_BASE       0x44E09000
+   #define UART_LSR         0x14
+   #define UART_LSR_THRE    (1 << 5)  // Bit 5
+   ```
+
+   QEMU (PL011):
+   ```c
+   #define UART0_BASE       0x101F1000
+   #define UART_FR          0x18  // Flag Register
+   #define UART_FR_TXFF     (1 << 5)  // Bit 5 (TX FIFO Full)
+   ```
+
+5. WATCHDOG:
+   Beagle: Requiere secuencia específica 0xAAAA → 0x5555
+   QEMU: watchdog_disable() es no-op (función vacía)
+
+6. INICIALIZACIÓN ADICIONAL EN QEMU:
+   - Copiar tabla de vectores a 0x00000000
+   - Configurar SP para modo IRQ explícitamente
+   - Llamar a uart_init() en main()
+
+
+================================================================================
+                    9. RESPUESTA A PREGUNTA SOBRE PCB
+================================================================================
+
+PREGUNTA DEL ESTUDIANTE:
+"En el inciso #3 del README dice que la estructura del PCB tiene que ser:
+- Process ID
+- Stack Pointer (SP)
+- Program Counter (PC)
+- Link Register (LR)
+- Saved Program Status Register (SPSR)
+- General-purpose registers R0–R12
+- State field (RUNNING/READY)
+
+Pero en nuestro código solo tenemos:
+    typedef struct {
+        uint32_t pid;
+        ProcessState state;
+        uint32_t sp;
+    } PCB;
+
+¿Por qué se realizó así?"
+
+
+RESPUESTA DETALLADA:
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  EXPLICACIÓN DEL DISEÑO DEL PCB                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+El README menciona que PC, LR, SPSR y R0-R12 son parte del PCB, pero en la
+implementación real estos campos NO están explícitamente en la estructura PCB.
+
+¿POR QUÉ?
+
+RAZÓN PRINCIPAL: OPTIMIZACIÓN DE MEMORIA Y SIMPLICIDAD
+
+1. LOS REGISTROS SE GUARDAN EN LA PILA, NO EN EL PCB
+   ─────────────────────────────────────────────────────
+
+   Cuando ocurre una interrupción, el contexto completo (R0-R12, LR, SPSR)
+   se guarda AUTOMÁTICAMENTE en la pila del proceso interrumpido:
+
+   ┌─────────────────────────────────────────────────────────────────┐
+   │  Pila del Proceso (crece hacia abajo)                           │
+   │                                                                 │
+   │  Alta │  [SPSR]     ← PCB.sp apunta aquí                       │
+   │       │  [LR]       ← PC de retorno                            │
+   │       │  [R12]                                                  │
+   │       │  [R11]                                                  │
+   │       │  ...                                                    │
+   │       │  [R1]                                                   │
+   │  Baja │  [R0]                                                   │
+   │                                                                 │
+   │  El PCB solo guarda el puntero (sp) a esta estructura           │
+   └─────────────────────────────────────────────────────────────────┘
+
+   Ventajas de este enfoque:
+   ✓ El PCB es más pequeño (solo 12 bytes: 3 words)
+   ✓ El acceso es más rápido (un solo puntero)
+   ✓ El contexto se guarda/restaura naturalmente con push/pop
+   ✓ No hay duplicación de datos
+
+
+2. EL PCB ES UN ÍNDICE, NO UN ALMACÉN DE CONTEXTO
+   ──────────────────────────────────────────────
+
+   El propósito del PCB es:
+   - Identificar el proceso (pid)
+   - Conocer su estado (state: READY/RUNNING/BLOCKED)
+   - Saber DÓNDE está guardado su contexto (sp)
+
+   No necesita almacenar los valores mismos de los registros.
+
+
+3. COMPARACIÓN DE ENFOQUES
+   ────────────────────────
+
+   ENFOQUE DEL README (Explícito):
+   ┌─────────────────────────────────────────────────┐
+   │  typedef struct {                               │
+   │      uint32_t pid;                              │
+   │      uint32_t sp;                               │
+   │      uint32_t pc;           ← EXPLÍCITO        │
+   │      uint32_t lr;           ← EXPLÍCITO        │
+   │      uint32_t spsr;         ← EXPLÍCITO        │
+   │      uint32_t r0;           ← EXPLÍCITO        │
+   │      ...                                        │
+   │      uint32_t r12;          ← EXPLÍCITO        │
+   │      ProcessState state;                        │
+   │  } PCB;                                         │
+   │                                                 │
+   │  Tamaño: ~60 bytes por proceso                  │
+   └─────────────────────────────────────────────────┘
+
+   ENFOQUE IMPLEMENTADO (Implícito/Optimizado):
+   ┌─────────────────────────────────────────────────┐
+   │  typedef struct {                               │
+   │      uint32_t pid;                              │
+   │      ProcessState state;                        │
+   │      uint32_t sp;           ← PUNTERO          │
+   │  } PCB;                                         │
+   │                                                 │
+   │  Tamaño: 12 bytes por proceso                   │
+   │                                                 │
+   │  Los registros están en la pila apuntada por sp │
+   └─────────────────────────────────────────────────┘
+
+
+4. VENTAJAS DEL ENFOQUE IMPLEMENTADO
+   ─────────────────────────────────
+
+   a) MENOR USO DE MEMORIA:
+      - PCB reducido de ~60 bytes a 12 bytes
+      - Importante en sistemas embebidos con memoria limitada
+
+   b) CAMBIO DE CONTEXTO MÁS RÁPIDO:
+      - Solo se actualiza un puntero (sp)
+      - Los registros se guardan/restauran con instrucciones
+        de bloque (push {r0-r12}, pop {r0-r12})
+
+   c) COHERENCIA CON EL HARDWARE:
+      - El hardware ARM ya usa la pila para guardar contexto
+      - Aprovechamos el mecanismo natural del procesador
+
+   d) SIMPLICIDAD EN EL CÓDIGO:
+      - No hay que copiar registros al/desde el PCB
+      - El contexto está donde el hardware lo deja
+
+
+5. ¿CÓMO SE ACCEDE A LOS REGISTROS ENTONCES?
+   ─────────────────────────────────────────
+
+   Si necesitas leer/modificar un registro específico:
+
+   // Obtener el valor de R0 del proceso P1
+   uint32_t* stack = (uint32_t*)pcb[PID_P1].sp;
+   uint32_t r0_value = stack[12];  // R0 está en la posición 12
+
+   // El layout de la pila es conocido:
+   // stack[0]  = SPSR
+   // stack[1]  = R0
+   // stack[2]  = R1
+   // ...
+   // stack[13] = R12
+   // stack[14] = LR (Entry Point)
+
+
+6. EL README DICE "OPCIONAL BUT RECOMMENDED"
+   ─────────────────────────────────────────
+
+   El README específicamente dice:
+   - SPSR: "(optional but recommended)"
+   - State field: "(optional but recommended)"
+
+   Esto indica flexibilidad en el diseño. La implementación
+   cumple con los requisitos mínimos:
+   ✓ Process ID
+   ✓ Stack Pointer
+   ✓ State field (RUNNING/READY/BLOCKED)
+
+   Los demás registros están implícitamente guardados vía el SP.
+
+
+CONCLUSIÓN:
+───────────
+El PCB se diseñó así por razones de:
+1. Eficiencia de memoria (12 bytes vs 60 bytes)
+2. Velocidad de cambio de contexto
+3. Alineación con el mecanismo natural de ARM
+4. Simplicidad de implementación
+
+El diseño es CORRECTO y cumple con los objetivos del proyecto.
+Es una implementación más madura y optimizada que la sugerida
+literalmente en el README.
+
+
+================================================================================
+                    10. VERIFICACIÓN Y PRUEBAS
+================================================================================
+
+CHECKLIST DE VERIFICACIÓN:
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  CRITERIOS DE ÉXITO                                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ☑ P1 imprime dígitos 0-9 correctamente                                    │
+│  ☑ P2 imprime letras a-z correctamente                                     │
+│  ☑ La salida está intercalada (P1, P2, P1, P2...)                          │
+│  ☑ No hay reset de la placa después de 60 segundos (watchdog disabled)     │
+│  ☑ El sistema continúa ejecutándose indefinidamente                        │
+│  ☑ Los mensajes "Tick" aparecen cada segundo                               │
+│  ☑ Los valores de SP cambian en cada context switch                        │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+SALIDA DE EJEMPLO ESPERADA:
+
+    === OS Starting ===
+      - Watchdog disabled
+      - Initializing PCBs...
+        - OS PCB initialized
+        - P1 initialized
+        - P2 initialized
+      - Timer started
+      - Starting first process (P1)...
+    === Context Switching Started ===
+    ----From P1: 0
+    ----From P1: 1
+    Tick
+    Context Switch: P1 SP=0x82110000 -> P2 SP=0x82210000
+    ----From P2: a
+    ----From P2: b
+    Tick
+    Context Switch: P2 SP=0x82210000 -> P1 SP=0x82110000
+    ----From P1: 2
+    ...
+
+
+================================================================================
+                    11. COMANDOS ÚTILES PARA LA PRESENTACIÓN
+================================================================================
+
+PARA BEAGLEBONE BLACK:
+─────────────────────
+
+    # 1. Compilar todo
+    make clean
+    make
+
+    # 2. Cargar binarios con U-Boot (desde terminal serial)
+    # En U-Boot:
+    loady 0x82000000   # Cargar OS
+    loady 0x82100000   # Cargar P1
+    loady 0x82200000   # Cargar P2
+    go 0x82000000      # Ejecutar OS
+
+    # 3. Conectar por serial (115200 baud)
+    screen /dev/ttyUSB0 115200
+    # Ctrl+A, K para salir
+
+
+PARA QEMU:
+──────────
+
+    # 1. Compilar y ejecutar
+    cd QEMU
+    ./build_and_run.sh
+
+    # 2. O manualmente:
+    make clean
+    # Compilar OS, P1, P2
+    qemu-system-arm -M versatilepb -m 128M -audio none -nographic \
+        -kernel obj/OS/os.elf \
+        -device loader,file=build/p1.bin,addr=0x00200000 \
+        -device loader,file=build/p2.bin,addr=0x00300000
+
+    # Ctrl+A, X para salir de QEMU
+
+
+COMANDOS DE DEPURACIÓN:
+──────────────────────
+
+    # Verificar binarios generados
+    ls -la bin/
+
+    # Ver información de ELF
+    arm-none-eabi-objdump -h build/os.elf
+    arm-none-eabi-nm build/os.elf
+
+    # Desensamblar para ver código
+    arm-none-eabi-objdump -D build/os.elf | less
+
+
+PUNTOS CLAVE PARA LA PRESENTACIÓN ORAL:
+──────────────────────────────────────
+
+1. ✓ Explicar el flujo: Reset → _start → main → first_context_switch → P1/P2
+
+2. ✓ Demostrar que el watchdog se desactiva (sin reset a los 60s)
+
+3. ✓ Mostrar salida intercalada como evidencia de multiprogramación
+
+4. ✓ Explicar el cambio de contexto con los valores de SP
+
+5. ✓ Mencionar las diferencias Beagle vs QEMU
+
+6. ✓ Justificar el diseño del PCB (pregunta del estudiante)
+
+7. ✓ Explicar Round-Robin: P1 → Timer → P2 → Timer → P1...
+
+
+================================================================================
+                              APÉNDICE A: GLOSARIO
+================================================================================
+
+    PCB          Process Control Block - Estructura que guarda el estado de un proceso
+    SP           Stack Pointer - Registro que apunta a la cima de la pila
+    PC           Program Counter - Registro que apunta a la siguiente instrucción
+    LR           Link Register - Registro de retorno de funciones (R14)
+    SPSR         Saved Program Status Register - Estado del procesador guardado
+    IRQ          Interrupt Request - Señal de interrupción hardware
+    INTC         Interrupt Controller - Controlador de interrupciones (Beagle)
+    VIC          Vector Interrupt Controller - Controlador de interrupciones (QEMU)
+    UART         Universal Asynchronous Receiver-Transmitter - Puerto serial
+    WDT          Watchdog Timer - Temporizador de seguridad que resetea el sistema
+    Round-Robin  Algoritmo de planificación circular por turnos
+    Context Switch Cambio de contexto entre procesos
+    .bss         Sección del binario para variables no inicializadas
+    ELF          Executable and Linkable Format - Formato de ejecutables
+    U-Boot       Bootloader usado en sistemas embebidos ARM
+
+
+================================================================================
+                         FIN DE LA GUÍA DE ESTUDIO
+================================================================================
+
+Documento generado para estudio y presentación del proyecto de Sistemas Operativos.
+Revisar cada sección antes de la presentación en clase.
+
+¡Éxito en tu presentación!
+
+================================================================================
