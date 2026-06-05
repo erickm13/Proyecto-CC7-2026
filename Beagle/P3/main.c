@@ -6,16 +6,11 @@ void delay(void) {
 }
 
 int main(void) {
-    char letter = 'a';
 
     while (1) {
-        PRINT("----From P2: %c\n", letter);
-        letter++;
-        if (letter > 'z') {
-            letter = 'a';
-        }
+        PRINT("----From P3 ------\n");
+        PRINT("Prueba Tercer Proceso.\n");
 
-        // Small delay for readability
         sys_yield();
         delay();
     }

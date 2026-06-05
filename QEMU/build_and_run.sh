@@ -7,7 +7,7 @@ echo "========================================"
 echo " Limpiando el entorno..."
 echo "========================================"
 rm -rf obj/ build/
-mkdir -p obj/OS obj/P1 obj/P2 obj/lib
+mkdir -p obj/OS obj/P1 obj/P2 obj/P3 obj/lib
 mkdir -p build
 
 echo "========================================"
@@ -45,9 +45,19 @@ arm-none-eabi-ld -T P2/linker.ld -o obj/P2/p2.elf obj/P2/start.o obj/P2/main.o o
 arm-none-eabi-objcopy -O binary obj/P2/p2.elf build/p2.bin
 
 echo "========================================"
+echo " 3. Compilando Proceso 3 (P3)"
+echo "========================================"
+arm-none-eabi-as -o obj/P3/start.o P3/start.s
+arm-none-eabi-gcc -c -Wall -O2 -nostdlib -nostartfiles -ffreestanding -o obj/P3/main.o P3/main.c
+# stdio.o and uart.o already compiled in P1 step
+arm-none-eabi-ld -T P3/linker.ld -o obj/P3/p3.elf obj/P3/start.o obj/P3/main.o obj/lib/stdio.o obj/lib/uart.o
+arm-none-eabi-objcopy -O binary obj/P3/p3.elf build/p3.bin
+
+echo "========================================"
 echo " Ejecutando en QEMU..."
 echo "========================================"
 qemu-system-arm -M versatilepb -m 128M -audio none -nographic \
     -kernel obj/OS/os.elf \
     -device loader,file=build/p1.bin,addr=0x00200000 \
-    -device loader,file=build/p2.bin,addr=0x00300000
+    -device loader,file=build/p2.bin,addr=0x00300000 \
+    -device loader,file=build/p3.bin,addr=0x00400000

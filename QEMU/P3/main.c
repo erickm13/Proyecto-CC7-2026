@@ -6,18 +6,13 @@ void delay(void) {
 }
 
 int main(void) {
-    char letter = 'a';
 
     while (1) {
         // Forzamos un valor en R4 para demostrar el context switch
         asm volatile("ldr r4, =0x02020202");
 
-        PRINT("----From P2: %c\n", letter);
-        letter++;
-        if (letter > 'z') {
-            letter = 'a';
-            //sys_exit(0);
-        }
+        PRINT("----From P3 ------\n");
+        PRINT("Prueba Tercer Proceso.\n");
 
         //const char msg[] = "P2 direct sys_write\n";
         //sys_write(1, msg, sizeof(msg) - 1);

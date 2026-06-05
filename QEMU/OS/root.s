@@ -50,11 +50,15 @@ copy_vectors:
     msr cpsr_c, #0xD2           @ Modo IRQ, IRQ/FIQ disabled
     ldr sp, =0x0000BFFF         @ Stack Pointer de IRQ
 
-    // 3. Configurar Pila para el modo SVC (Supervisor - OS)
+    // 3. Configurar pila para Abort mode
+    msr cpsr_c, #0xD7           @ Modo ABT, IRQ/FIQ disabled
+    ldr sp, =0x0000AFFF         @ Stack Pointer de aborts
+
+    // 4. Configurar Pila para el modo SVC (Supervisor - OS)
     msr cpsr_c, #0xD3           @ Modo SVC, IRQ/FIQ disabled
     ldr sp, =0x00010000         @ Stack Pointer del OS (os.h)
 
-    // 4. Limpiar la sección .bss
+    // 5. Limpiar la sección .bss
     ldr r0, =__bss_start__
     ldr r1, =__bss_end__
     mov r2, #0
@@ -65,7 +69,7 @@ clear_bss_loop:
     b clear_bss_loop
 clear_bss_done:
 
-    // 5. Saltar a main en os.c
+    // 6. Saltar a main en os.c
     bl main
     b hang
 
@@ -73,13 +77,84 @@ undefined_handler:
     b hang
 
 swi_handler:
-    b hang
+    @ LR_svc already points to the instruction after svc.
+    push {r0-r12, lr}
+    mrs r0, spsr
+    push {r0}
+
+    mov r4, sp
+    msr cpsr_c, #0xDF
+    mov r1, sp
+    msr cpsr_c, #0xD3
+    mov sp, r4
+
+    mov r0, sp
+    bl c_svc_handler
+
+    mov r4, r0
+    bl get_current_user_sp
+    msr cpsr_c, #0xDF
+    mov sp, r0
+    msr cpsr_c, #0xD3
+    mov sp, r4
+
+    pop {r0}
+    msr spsr_cxsf, r0
+    ldmfd sp!, {r0-r12, pc}^
 
 prefetch_handler:
-    b hang
+    sub lr, lr, #4
+    push {r0-r12, lr}
+    mrs r0, spsr
+    push {r0}
+
+    mov r4, sp
+    msr cpsr_c, #0xDF
+    mov r1, sp
+    msr cpsr_c, #0xD7
+    mov sp, r4
+
+    mov r0, sp
+    mov r2, #1
+    bl c_fault_handler
+
+    mov r4, r0
+    bl get_current_user_sp
+    msr cpsr_c, #0xDF
+    mov sp, r0
+    msr cpsr_c, #0xD7
+    mov sp, r4
+
+    pop {r0}
+    msr spsr_cxsf, r0
+    ldmfd sp!, {r0-r12, pc}^
 
 data_handler:
-    b hang
+    sub lr, lr, #8
+    push {r0-r12, lr}
+    mrs r0, spsr
+    push {r0}
+
+    mov r4, sp
+    msr cpsr_c, #0xDF
+    mov r1, sp
+    msr cpsr_c, #0xD7
+    mov sp, r4
+
+    mov r0, sp
+    mov r2, #2
+    bl c_fault_handler
+
+    mov r4, r0
+    bl get_current_user_sp
+    msr cpsr_c, #0xDF
+    mov sp, r0
+    msr cpsr_c, #0xD7
+    mov sp, r4
+
+    pop {r0}
+    msr spsr_cxsf, r0
+    ldmfd sp!, {r0-r12, pc}^
 
 fiq_handler:
     b hang
@@ -97,15 +172,24 @@ irq_handler:
     @ Guardar SPSR
     mrs r0, spsr
     push {r0}
-    
+
+    mov r4, sp
+    msr cpsr_c, #0xDF
+    mov r1, sp
+    msr cpsr_c, #0xD2
+    mov sp, r4
 
     @ Llamar al planificador
     mov r0, sp
     bl c_context_switch
     
-    @ Restaurar SP del nuevo proceso
+    mov r4, r0
+    bl get_current_user_sp
+    msr cpsr_c, #0xDF
     mov sp, r0
-    
+    msr cpsr_c, #0xD2
+    mov sp, r4
+
     @ Restaurar SPSR
     pop {r0}
     msr spsr_cxsf, r0
@@ -118,9 +202,13 @@ irq_handler:
 // ============================================================================
 start_process_asm:
     @ r0 contiene el SP del proceso inicial
-    @ Cambiamos a IRQ mode para usar su sp banked para el primer salto
-    msr cpsr_c, #0xD2
+    @ Cambiamos a IRQ mode para usar la misma ruta de restore de excepciones
+    mov r4, r0
+    bl get_current_user_sp
+    msr cpsr_c, #0xDF
     mov sp, r0
+    msr cpsr_c, #0xD2
+    mov sp, r4
     
     @ Sacar SPSR inicial
     pop {r0}

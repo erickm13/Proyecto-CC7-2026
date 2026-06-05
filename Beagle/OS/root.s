@@ -19,7 +19,7 @@ vector_table:
     b undefined_handler
     
     // Software Interrupt Vector (0x08)
-    b swi_handler
+    b svc_handler
     
     // Prefetch Abort Vector (0x0C)
     b prefetch_abort_handler
@@ -42,14 +42,84 @@ vector_table:
 undefined_handler:
     b hang
 
-swi_handler:
-    b hang
+svc_handler:
+    push {r0-r12, lr}
+    mrs r0, spsr
+    push {r0}
+
+    mov r4, sp
+    msr cpsr_c, #0xDF
+    mov r1, sp
+    msr cpsr_c, #0xD3
+    mov sp, r4
+
+    mov r0, sp
+    bl c_svc_handler
+
+    mov r4, r0
+    bl get_current_user_sp
+    msr cpsr_c, #0xDF
+    mov sp, r0
+    msr cpsr_c, #0xD3
+    mov sp, r4
+
+    pop {r0}
+    msr spsr_cxsf, r0
+    ldmfd sp!, {r0-r12, pc}^
 
 prefetch_abort_handler:
-    b hang
+    sub lr, lr, #4
+    push {r0-r12, lr}
+    mrs r0, spsr
+    push {r0}
+
+    mov r4, sp
+    msr cpsr_c, #0xDF
+    mov r1, sp
+    msr cpsr_c, #0xD7
+    mov sp, r4
+
+    mov r0, sp
+    mov r2, #1
+    bl c_fault_handler
+
+    mov r4, r0
+    bl get_current_user_sp
+    msr cpsr_c, #0xDF
+    mov sp, r0
+    msr cpsr_c, #0xD7
+    mov sp, r4
+
+    pop {r0}
+    msr spsr_cxsf, r0
+    ldmfd sp!, {r0-r12, pc}^
 
 data_abort_handler:
-    b hang
+    sub lr, lr, #8
+    push {r0-r12, lr}
+    mrs r0, spsr
+    push {r0}
+
+    mov r4, sp
+    msr cpsr_c, #0xDF
+    mov r1, sp
+    msr cpsr_c, #0xD7
+    mov sp, r4
+
+    mov r0, sp
+    mov r2, #2
+    bl c_fault_handler
+
+    mov r4, r0
+    bl get_current_user_sp
+    msr cpsr_c, #0xDF
+    mov sp, r0
+    msr cpsr_c, #0xD7
+    mov sp, r4
+
+    pop {r0}
+    msr spsr_cxsf, r0
+    ldmfd sp!, {r0-r12, pc}^
 
 fiq_handler:
     b hang
@@ -65,11 +135,14 @@ _start:
     cpsid i
     cpsid f
     
-    // Set CPU to SVC mode (Supervisor mode) for initialization
-    mrs r0, cpsr
-    bic r0, r0, #0x1F
-    orr r0, r0, #0x13
-    msr cpsr_c, r0
+    // Set exception stacks before entering C.
+    msr cpsr_c, #0xD2
+    ldr sp, =0x8200BFFF
+
+    msr cpsr_c, #0xD7
+    ldr sp, =0x8200AFFF
+
+    msr cpsr_c, #0xD3
     
     // Set up SVC mode stack pointer
     ldr sp, =_stack_top
@@ -106,40 +179,45 @@ clear_bss_done:
 // ============================================================================
 irq_handler:
     sub lr, lr, #4          @ Ajustar LR_irq
-    cps #0x13               @ Cambiar a SVC mode
-    push {r0-r12}           @ Guardar registros
-    push {lr}               @ Guardar el PC de retorno
-    mrs r12, spsr
-    push {r12}              @ Guardar SPSR
+    push {r0-r12, lr}       @ Guardar registros y PC de retorno
+    mrs r0, spsr
+    push {r0}               @ Guardar SPSR
+
+    mov r4, sp
+    msr cpsr_c, #0xDF
+    mov r1, sp
+    msr cpsr_c, #0xD2
+    mov sp, r4
 
     mov r0, sp              @ Pasar SP actual a C
     bl c_context_switch
-    mov sp, r0              @ Cargar nuevo SP
 
-    pop {r12}               @ Recuperar SPSR del nuevo proceso
-    msr spsr_cxsf, r12      @ Preparar SPSR para el retorno
+    mov r4, r0
+    bl get_current_user_sp
+    msr cpsr_c, #0xDF
+    mov sp, r0
+    msr cpsr_c, #0xD2
+    mov sp, r4
 
-    pop {lr}                @ Recuperar PC de retorno hacia LR
-    pop {r0-r12}            @ Recuperar registros generales
-
-    subs pc, lr, #0         @ ¡IMPORTANTE! Usa #0 porque el ajuste -4 ya se hizo arriba
+    pop {r0}                @ Recuperar SPSR del nuevo proceso
+    msr spsr_cxsf, r0       @ Preparar SPSR para el retorno
+    ldmfd sp!, {r0-r12, pc}^
 
 // ============================================================================
 // First Context Switch - Jump from OS to first user process
 // ============================================================================
 .global start_process_asm
 start_process_asm:
-    mov sp, r0         @ Cargar el SP del proceso 1
+    mov r4, r0
+    bl get_current_user_sp
+    msr cpsr_c, #0xDF
+    mov sp, r0
+    msr cpsr_c, #0xD2  @ Usar la misma ruta de restore de excepciones
+    mov sp, r4         @ Cargar el SP del proceso 1
     
-    pop {r12}          @ Sacar SPSR
-    msr spsr_cxsf, r12 
-    
-    pop {lr}           @ Sacar Entry Point
-    pop {r0-r12}       @ Sacar registros
-    
-    @ El truco final: usamos subs pc para saltar al proceso y cambiar de modo 
-    @ atómicamente, como si fuera el fin de una IRQ.
-    subs pc, lr, #0
+    pop {r0}           @ Sacar SPSR
+    msr spsr_cxsf, r0
+    ldmfd sp!, {r0-r12, pc}^
 
 // ============================================================================
 // Low-level memory access functions
