@@ -2,6 +2,112 @@
 
 ## Building a Bare-Metal ARM Operating System
 
+---
+
+## Phase 2 — Execution Modes and Syscalls
+
+> Reference document: [`002Execution_modes_and_Syscalls.pdf`](002Execution_modes_and_Syscalls.pdf)
+
+Phase 2 advances the kernel from "preemptive task switching works" to "preemptive switching works under protected kernel control." It introduces a strict user/kernel execution boundary, a minimal syscall ABI, and fault-driven process isolation, while preserving the timer-driven round-robin scheduler from Phase 1.
+
+### What was added
+
+#### User/Kernel boundary
+- User processes now run in ARM **USR mode** (`CPSR = 0x10`) instead of SVC mode.
+- The kernel runs in privileged modes (SVC, IRQ, ABT).
+- Each process's initial context is built with `CPSR = 0x10` so the first `ldmfd ..., {r0-r12, pc}^` exception return lands in USR.
+
+#### Syscall ABI (`lib/user_syscalls.h`)
+User processes request kernel services via `svc #0` with arguments in `r0–r3`:
+
+| Symbol | ID | Description |
+|---|---:|---|
+| `SYS_YIELD` | 0 | Voluntary reschedule |
+| `SYS_EXIT`  | 1 | Terminate caller; no return |
+| `SYS_WRITE` | 2 | Write bytes to UART (fd=1) |
+
+Return value in `r0`: `>= 0` success, `-1` invalid ID, `-2` invalid fd/arg, `-3` invalid user pointer.
+
+#### Fault handling
+- **Prefetch abort** and **data abort** vectors are wired to `c_fault_handler`.
+- The faulting process is marked `TERMINATED` and removed from the runnable set.
+- The scheduler picks the next healthy process; the kernel and peers continue unaffected.
+- Abort mode stack configured at `0x0000AFFF` (QEMU) / `0x8200AFFF` (BeagleBone).
+
+#### PCB extensions
+```c
+typedef struct {
+    uint32_t pid;
+    ProcessState state;   // READY | RUNNING | BLOCKED | TERMINATED
+    uint32_t sp;          // saved kernel-side trap frame pointer
+    uint32_t user_sp;     // USR mode stack pointer
+    uint32_t mem_start;   // user memory region start
+    uint32_t mem_end;     // user memory region end
+    int32_t  exit_code;
+    uint32_t fault_type;  // 1=prefetch, 2=data abort
+} PCB;
+```
+
+#### MODE_SWITCH traces
+Every kernel/user crossing emits a line on UART:
+
+| # | Example |
+|---|---|
+| Initial launch | `MODE_SWITCH KERNEL_TO_USER pid=1 reason=initial_launch` |
+| Timer IRQ | `MODE_SWITCH USER_TO_KERNEL pid=1 reason=timer_irq` |
+| Dispatch | `MODE_SWITCH KERNEL_TO_USER pid=2 reason=dispatch` |
+| Syscall entry | `MODE_SWITCH USER_TO_KERNEL pid=1 reason=syscall id=2` |
+| Syscall return | `MODE_SWITCH KERNEL_TO_USER pid=1 reason=syscall_return id=2 rc=7` |
+| Fault | `MODE_SWITCH USER_TO_KERNEL pid=2 reason=fault type=2` |
+| Fault recovery | `MODE_SWITCH KERNEL_TO_USER pid=1 reason=fault_recovery` |
+
+#### Third user process (P3)
+A third process was added to both QEMU and BeagleBone. It prints a fixed message and calls `sys_yield()` on each iteration.
+
+### Memory layout (Phase 2)
+
+#### BeagleBone Black
+
+| Region | Start | Size |
+|---|---:|---:|
+| OS code/data | `0x82000000` | 64 KB |
+| P1 code/data | `0x82100000` | 64 KB |
+| P2 code/data | `0x82200000` | 64 KB |
+| P3 code/data | `0x82300000` | 64 KB |
+
+#### QEMU (versatilepb)
+
+| Region | Start | Size |
+|---|---:|---:|
+| OS code/data | `0x00000000` | ~64 KB |
+| P1 code/data | `0x00200000` | 1 MB |
+| P2 code/data | `0x00300000` | 1 MB |
+| P3 code/data | `0x00400000` | 1 MB |
+
+### Build and load (Phase 2)
+
+#### QEMU
+```bash
+cd QEMU && ./build_and_run.sh
+```
+
+#### BeagleBone Black
+```bash
+make beagle
+```
+Then load with U-Boot:
+```
+loady 0x82000000   # os.bin
+loady 0x82100000   # p1.bin
+loady 0x82200000   # p2.bin
+loady 0x82300000   # p3.bin
+go    0x82000000
+```
+
+---
+
+## Phase 1 — Multiprogramming (Baseline)
+
 ### General Description
 This project implements a minimal multiprogramming (multitasking) system on the **BeagleBone Black** (AM335x, ARM Cortex-A8). The system runs without an underlying operating system and manages three distinct programs resident in memory:
 
