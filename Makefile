@@ -32,6 +32,7 @@ BEAGLE_LIB_OBJS = $(BEAGLE_BUILD_DIR)/uart.o $(BEAGLE_BUILD_DIR)/stdio.o $(BEAGL
 BEAGLE_OS_OBJS = $(BEAGLE_BUILD_DIR)/root.o $(BEAGLE_BUILD_DIR)/os.o $(BEAGLE_BUILD_DIR)/timer.o $(BEAGLE_LIB_OBJS)
 BEAGLE_P1_OBJS = $(BEAGLE_BUILD_DIR)/start_p1.o $(BEAGLE_BUILD_DIR)/main_p1.o $(BEAGLE_LIB_OBJS)
 BEAGLE_P2_OBJS = $(BEAGLE_BUILD_DIR)/start_p2.o $(BEAGLE_BUILD_DIR)/main_p2.o $(BEAGLE_LIB_OBJS)
+BEAGLE_P3_OBJS = $(BEAGLE_BUILD_DIR)/start_p3.o $(BEAGLE_BUILD_DIR)/main_p3.o $(BEAGLE_LIB_OBJS)
 
 # Target por defecto
 .PHONY: all clean directories beagle
@@ -41,13 +42,14 @@ all: directories $(BIN_DIR)/os.bin $(BIN_DIR)/p1.bin $(BIN_DIR)/p2.bin
 	@echo "Tus binarios están en la carpeta $(BIN_DIR)/"
 
 # Target para BeagleBone Black
-beagle: beagle-directories $(BEAGLE_BIN_DIR)/os.bin $(BEAGLE_BIN_DIR)/p1.bin $(BEAGLE_BIN_DIR)/p2.bin
+beagle: beagle-directories $(BEAGLE_BIN_DIR)/os.bin $(BEAGLE_BIN_DIR)/p1.bin $(BEAGLE_BIN_DIR)/p2.bin $(BEAGLE_BIN_DIR)/p3.bin
 	@echo "=== COMPILACIÓN EXITOSA (BEAGLE) ==="
 	@echo "Tus binarios están en la carpeta $(BEAGLE_BIN_DIR)/"
 	@echo "=== DIRECCIONES PARA COOLTERM ==="
 	@echo "1. $(BEAGLE_BIN_DIR)/os.bin"
 	@echo "2. $(BEAGLE_BIN_DIR)/p1.bin"
 	@echo "3. $(BEAGLE_BIN_DIR)/p2.bin"
+	@echo "4. $(BEAGLE_BIN_DIR)/p3.bin"
 	@echo "Usa 'loady' en CoolTerm para subir cada archivo"
 
 # Crear directorios si no existen
@@ -154,6 +156,20 @@ $(BEAGLE_BIN_DIR)/p2.bin: $(BEAGLE_P2_OBJS)
 	@echo "Enlazando P2 (Beagle)..."
 	$(LD) -T Beagle/P2/linker.ld $(BEAGLE_P2_OBJS) -o $(BEAGLE_BUILD_DIR)/p2.elf
 	$(OBJCOPY) -O binary $(BEAGLE_BUILD_DIR)/p2.elf $@
+
+# ==========================================
+# 5. Compilar Proceso 3 (Beagle)
+# ==========================================
+$(BEAGLE_BUILD_DIR)/start_p3.o: Beagle/P3/start.s
+	$(AS) $< -o $@
+
+$(BEAGLE_BUILD_DIR)/main_p3.o: Beagle/P3/main.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BEAGLE_BIN_DIR)/p3.bin: $(BEAGLE_P3_OBJS)
+	@echo "Enlazando P3 (Beagle)..."
+	$(LD) -T Beagle/P3/linker.ld $(BEAGLE_P3_OBJS) -o $(BEAGLE_BUILD_DIR)/p3.elf
+	$(OBJCOPY) -O binary $(BEAGLE_BUILD_DIR)/p3.elf $@
 
 # ==========================================
 # Limpieza Total
